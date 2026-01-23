@@ -194,9 +194,20 @@ def show_summary(response: Response):
         response.headers["Cache-Control"] = "no-store"
 
         df = build_summary_df()
-        last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        table_html = df.to_html(index=False, border=0, justify="center")
+        # 🔹 HIDE binary score columns from UI
+        display_df = df.drop(
+            columns=[
+                "RSI_Score",
+                "MACD_Score",
+                "ADX_Score",
+                "Aroon_Score",
+                "OBV_Score"
+            ]
+        )
+
+        last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        table_html = display_df.to_html(index=False, border=0, justify="center")
 
         return f"""
         <html>
