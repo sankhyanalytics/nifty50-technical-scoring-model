@@ -21,7 +21,7 @@ from sklearn.linear_model import LinearRegression
 # ========================
 app = FastAPI(
     title="Nifty50 Technical Dashboard",
-    version="4.1"
+    version="4.2"
 )
 
 CSV_PATH = "N50.csv"
@@ -142,6 +142,12 @@ def build_summary_df():
 
     summary_df["Score_Interpretation"] = summary_df["Technical_Score"].apply(interpret)
 
+    # ========================
+    # ROUND ALL NUMERIC COLUMNS
+    # ========================
+    numeric_cols = summary_df.select_dtypes(include=[np.number]).columns
+    summary_df[numeric_cols] = summary_df[numeric_cols].round(2)
+
     return summary_df
 
 
@@ -157,7 +163,7 @@ def dashboard():
     )
 
     data = display_df.to_dict(orient="records")
-    pie_map = df.groupby("Score_Interpretation")["Stock"].apply(list).to_dict()
+    pie_map = df.groupby("Score_Interpretation")["Stock"].count().to_dict()
 
     unique_values = {
         col: sorted(display_df[col].astype(str).unique())
@@ -195,16 +201,6 @@ button {{
 
 #table-container {{
     margin-top: 60px;
-}}
-
-#stock-panel {{
-    display: none;
-    max-height: 260px;
-    overflow-y: auto;
-    border: 1px solid #ccc;
-    padding: 10px;
-    margin-top: 10px;
-    width: 360px;
 }}
 
 table {{
@@ -253,11 +249,6 @@ tr:nth-child(even) {{
 
 <div id="pie-container">
     <div id="pie" style="height:420px;"></div>
-
-    <div id="stock-panel">
-        <b id="panel-title"></b>
-        <ul id="stock-list"></ul>
-    </div>
 </div>
 
 <div id="table-container">
@@ -289,17 +280,17 @@ tr:nth-child(even) {{
 ⚠ <b>IMPORTANT NOTE</b><br><br>
 Technical Score ranges from 0–5 and is computed by adding the score for 5 technical features:
 <br><br>
-(1) <b>RSI</b>: 40 ≤ RSI ≤ 60 → Score = 1, else 0<br>
-(2) <b>MACD Histogram</b>: &gt; 0 → Score = 1, else 0<br>
-(3) <b>ADX</b>: &gt; 25 → Score = 1, else 0<br>
-(4) <b>Aroon</b>: Up &gt; 70 AND Down &lt; 30 → Score = 1, else 0<br>
-(5) <b>OBV</b>: Slope &gt; 0 → Score = 1, else 0
+(1) RSI: 40 ≤ RSI ≤ 60 → Score = 1, else 0<br>
+(2) MACD Histogram: &gt; 0 → Score = 1, else 0<br>
+(3) ADX: &gt; 25 → Score = 1, else 0<br>
+(4) Aroon: Up &gt; 70 AND Down &lt; 30 → Score = 1, else 0<br>
+(5) OBV: Slope &gt; 0 → Score = 1, else 0
 </div>
 
 <script>
 const rows = document.querySelectorAll("#dataTable tbody tr");
 const filters = document.querySelectorAll("thead select");
-const pieMap = {json.dumps(pie_map)};
+const pieData = {json.dumps(pie_map)};
 const tableData = {json.dumps(data)};
 
 function applyFilters() {{
@@ -318,7 +309,6 @@ function applyFilters() {{
 function resetFilters() {{
   filters.forEach(sel => Array.from(sel.options).forEach(o => o.selected = false));
   rows.forEach(r => r.style.display = "");
-  document.getElementById("stock-panel").style.display = "none";
 }}
 
 function downloadCSV() {{
@@ -335,38 +325,21 @@ function downloadCSV() {{
 
 Plotly.newPlot("pie", [{{
   type: "pie",
-  labels: Object.keys(pieMap),
-  values: Object.values(pieMap).map(v => v.length),
+  labels: Object.keys(pieData),
+  values: Object.values(pieData),
   hovertemplate:
     "<b>%{{label}}</b><br>" +
     "Stocks: %{{value}}<br>" +
-    "Click to view list" +
     "<extra></extra>"
 }}]);
 
 document.getElementById("pie").on("plotly_click", function(d) {{
   const category = d.points[0].label;
-  const stocks = pieMap[category];
-
-  document.getElementById("panel-title").innerText =
-    category + " (" + stocks.length + " stocks)";
-
-  const list = document.getElementById("stock-list");
-  list.innerHTML = "";
-  stocks.forEach(s => {{
-    const li = document.createElement("li");
-    li.innerText = s;
-    list.appendChild(li);
-  }});
-
-  document.getElementById("stock-panel").style.display = "block";
-
   const sel = filters[{score_col_index}];
   Array.from(sel.options).forEach(o => o.selected = false);
   Array.from(sel.options)
     .filter(o => o.value === category)
     .forEach(o => o.selected = true);
-
   applyFilters();
 }});
 </script>
