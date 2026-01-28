@@ -2,12 +2,13 @@
 # Importing Libraries
 # ========================
 import os
+import json
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from ta.momentum import RSIIndicator
@@ -19,8 +20,8 @@ from sklearn.linear_model import LinearRegression
 # FastAPI App
 # ========================
 app = FastAPI(
-    title="Nifty50 Technical Scoring API",
-    version="1.0"
+    title="Nifty50 Technical Dashboard",
+    version="4.1"
 )
 
 CSV_PATH = "N50.csv"
@@ -50,6 +51,11 @@ def build_summary_df():
     start_date = end_date - timedelta(days=LOOKBACK_DAYS)
 
     stocklist = pd.read_csv(CSV_PATH)
+    stocklist["Symbol"] = stocklist["Symbol"].str.strip()
+    stocklist["Sector"] = stocklist["Industry"].fillna("Unknown")
+
+    sector_map = dict(zip(stocklist["Symbol"], stocklist["Sector"]))
+
     symbols = stocklist["Symbol"].unique()
     symbols_ns = [s + ".NS" for s in symbols]
 
@@ -58,12 +64,13 @@ def build_summary_df():
         start=start_date,
         end=end_date,
         progress=False,
-        threads=True
+        threads=True,
+        auto_adjust=False
     )
 
     close_df = stockdata["Close"].copy()
     close_df.columns = close_df.columns.str.replace(".NS", "", regex=False)
-    returns_df = close_df.pct_change() * 100
+    returns_df = close_df.pct_change(fill_method=None) * 100
 
     rsi, macd_h, adx = {}, {}, {}
     aroon_up, aroon_down, obv_slope = {}, {}, {}
@@ -93,12 +100,10 @@ def build_summary_df():
 
         obv_slope[stock] = compute_obv_slope(obv_series)
 
-    # ========================
-    # Build Summary DF (aligned)
-    # ========================
     summary_df = pd.DataFrame(index=close_df.columns)
-
     summary_df["Stock"] = summary_df.index
+    summary_df["Sector"] = summary_df["Stock"].map(sector_map).fillna("Unknown")
+
     summary_df["Max_Value"] = close_df.max()
     summary_df["Min_Value"] = close_df.min()
     summary_df["Current_Value"] = close_df.iloc[-1]
@@ -112,28 +117,14 @@ def build_summary_df():
     summary_df["Aroon_Down"] = pd.Series(aroon_down)
     summary_df["OBV_Slope"] = pd.Series(obv_slope)
 
-    # Remove dummy / invalid stocks
     summary_df = summary_df.dropna(
         subset=["Current_Value", "RSI", "MACD_Hist", "ADX", "OBV_Slope"]
-    )
+    ).reset_index(drop=True)
 
-    summary_df = summary_df.reset_index(drop=True)
-
-    # ========================
-    # Scoring Logic
-    # ========================
-    summary_df["RSI_Score"] = (
-        (summary_df["RSI"] >= 40) & (summary_df["RSI"] <= 60)
-    ).astype(int)
-
+    summary_df["RSI_Score"] = ((summary_df["RSI"] >= 40) & (summary_df["RSI"] <= 60)).astype(int)
     summary_df["MACD_Score"] = (summary_df["MACD_Hist"] > 0).astype(int)
     summary_df["ADX_Score"] = (summary_df["ADX"] >= 25).astype(int)
-
-    summary_df["Aroon_Score"] = (
-        (summary_df["Aroon_Up"] > 70) &
-        (summary_df["Aroon_Down"] < 30)
-    ).astype(int)
-
+    summary_df["Aroon_Score"] = ((summary_df["Aroon_Up"] > 70) & (summary_df["Aroon_Down"] < 30)).astype(int)
     summary_df["OBV_Score"] = (summary_df["OBV_Slope"] > 0).astype(int)
 
     summary_df["Technical_Score"] = summary_df[
@@ -155,127 +146,238 @@ def build_summary_df():
 
 
 # ========================
-# HOME – Button Page
+# DASHBOARD ENDPOINT
 # ========================
 @app.get("/", response_class=HTMLResponse)
-def home():
-    return """
-    <html>
-    <head>
-        <title>Nifty50 Technical Scoring</title>
-        <style>
-            body {
-                font-family: Arial, sans-serif;
-                padding: 40px;
-            }
-            button {
-                padding: 14px 28px;
-                font-size: 16px;
-                cursor: pointer;
-            }
-        </style>
-    </head>
-    <body>
-        <h2>Nifty50 Technical Scoring Model</h2>
-        <form action="/run" method="get">
-            <button type="submit">Load Summary</button>
-        </form>
-    </body>
-    </html>
-    """
+def dashboard():
+    df = build_summary_df()
 
+    display_df = df.drop(
+        columns=["RSI_Score","MACD_Score","ADX_Score","Aroon_Score","OBV_Score"]
+    )
+
+    data = display_df.to_dict(orient="records")
+    pie_map = df.groupby("Score_Interpretation")["Stock"].apply(list).to_dict()
+
+    unique_values = {
+        col: sorted(display_df[col].astype(str).unique())
+        for col in display_df.columns
+    }
+
+    score_col_index = list(display_df.columns).index("Score_Interpretation")
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+<title>Nifty50 Technical Dashboard</title>
+<script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+<style>
+body {{
+    font-family: Arial;
+    padding: 20px;
+}}
+
+select {{
+    width: 100%;
+    height: 110px;
+}}
+
+button {{
+    padding: 6px 12px;
+    margin: 8px 6px;
+}}
+
+#pie-container {{
+    margin-bottom: 60px;
+}}
+
+#table-container {{
+    margin-top: 60px;
+}}
+
+#stock-panel {{
+    display: none;
+    max-height: 260px;
+    overflow-y: auto;
+    border: 1px solid #ccc;
+    padding: 10px;
+    margin-top: 10px;
+    width: 360px;
+}}
+
+table {{
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+}}
+
+th, td {{
+    border: 1px solid #ddd;
+    padding: 6px;
+    text-align: center;
+}}
+
+th {{
+    background: #f4f6f8;
+    position: sticky;
+    top: 0;
+}}
+
+tr:nth-child(even) {{
+    background: #fafafa;
+}}
+
+.footer {{
+    margin-top: 50px;
+    padding: 16px 18px;
+    background-color: #fff3cd;
+    border-left: 6px solid #ff9800;
+    font-size: 14px;
+    font-weight: bold;
+    color: #5a3e00;
+    line-height: 1.6;
+}}
+</style>
+</head>
+
+<body>
+
+<h2>Nifty50 Technical Scoring Dashboard</h2>
+
+<p><b>Tip:</b> Hold <b>Ctrl</b> (Windows) or <b>Cmd</b> (Mac) to select multiple values</p>
+
+<button onclick="resetFilters()">🔄 Reset Filters</button>
+<button onclick="downloadCSV()">⬇ Download CSV</button>
+
+<div id="pie-container">
+    <div id="pie" style="height:420px;"></div>
+
+    <div id="stock-panel">
+        <b id="panel-title"></b>
+        <ul id="stock-list"></ul>
+    </div>
+</div>
+
+<div id="table-container">
+<table id="dataTable">
+<thead>
+<tr>
+{''.join(f"<th>{c}</th>" for c in display_df.columns)}
+</tr>
+<tr>
+{''.join(
+    "<th><select multiple size='6' onchange='applyFilters()'>" +
+    "".join(f"<option value='{v}'>{v}</option>" for v in unique_values[c]) +
+    "</select></th>"
+    for c in display_df.columns
+)}
+</tr>
+</thead>
+
+<tbody>
+{''.join(
+    "<tr>" + "".join(f"<td>{row[c]}</td>" for c in display_df.columns) + "</tr>"
+    for row in data
+)}
+</tbody>
+</table>
+</div>
+
+<div class="footer">
+⚠ <b>IMPORTANT NOTE</b><br><br>
+Technical Score ranges from 0–5 and is computed by adding the score for 5 technical features:
+<br><br>
+(1) <b>RSI</b>: 40 ≤ RSI ≤ 60 → Score = 1, else 0<br>
+(2) <b>MACD Histogram</b>: &gt; 0 → Score = 1, else 0<br>
+(3) <b>ADX</b>: &gt; 25 → Score = 1, else 0<br>
+(4) <b>Aroon</b>: Up &gt; 70 AND Down &lt; 30 → Score = 1, else 0<br>
+(5) <b>OBV</b>: Slope &gt; 0 → Score = 1, else 0
+</div>
+
+<script>
+const rows = document.querySelectorAll("#dataTable tbody tr");
+const filters = document.querySelectorAll("thead select");
+const pieMap = {json.dumps(pie_map)};
+const tableData = {json.dumps(data)};
+
+function applyFilters() {{
+  rows.forEach(row => {{
+    let visible = true;
+    filters.forEach((sel, i) => {{
+      const selected = Array.from(sel.selectedOptions).map(o => o.value);
+      if (selected.length && !selected.includes(row.cells[i].innerText)) {{
+        visible = false;
+      }}
+    }});
+    row.style.display = visible ? "" : "none";
+  }});
+}}
+
+function resetFilters() {{
+  filters.forEach(sel => Array.from(sel.options).forEach(o => o.selected = false));
+  rows.forEach(r => r.style.display = "");
+  document.getElementById("stock-panel").style.display = "none";
+}}
+
+function downloadCSV() {{
+  let csv = Object.keys(tableData[0]).join(",") + "\\n";
+  tableData.forEach(r => {{
+    csv += Object.values(r).join(",") + "\\n";
+  }});
+  const blob = new Blob([csv], {{ type: "text/csv" }});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "nifty50_summary.csv";
+  a.click();
+}}
+
+Plotly.newPlot("pie", [{{
+  type: "pie",
+  labels: Object.keys(pieMap),
+  values: Object.values(pieMap).map(v => v.length),
+  hovertemplate:
+    "<b>%{{label}}</b><br>" +
+    "Stocks: %{{value}}<br>" +
+    "Click to view list" +
+    "<extra></extra>"
+}}]);
+
+document.getElementById("pie").on("plotly_click", function(d) {{
+  const category = d.points[0].label;
+  const stocks = pieMap[category];
+
+  document.getElementById("panel-title").innerText =
+    category + " (" + stocks.length + " stocks)";
+
+  const list = document.getElementById("stock-list");
+  list.innerHTML = "";
+  stocks.forEach(s => {{
+    const li = document.createElement("li");
+    li.innerText = s;
+    list.appendChild(li);
+  }});
+
+  document.getElementById("stock-panel").style.display = "block";
+
+  const sel = filters[{score_col_index}];
+  Array.from(sel.options).forEach(o => o.selected = false);
+  Array.from(sel.options)
+    .filter(o => o.value === category)
+    .forEach(o => o.selected = true);
+
+  applyFilters();
+}});
+</script>
+
+</body>
+</html>
+"""
+    
 
 # ========================
-# RUN – Compute & Show Summary
-# ========================
-@app.get("/run", response_class=HTMLResponse)
-def show_summary(response: Response):
-    try:
-        response.headers["Cache-Control"] = "no-store"
-
-        df = build_summary_df()
-
-        # 🔹 HIDE binary score columns from UI
-        display_df = df.drop(
-            columns=[
-                "RSI_Score",
-                "MACD_Score",
-                "ADX_Score",
-                "Aroon_Score",
-                "OBV_Score"
-            ]
-        )
-
-        last_updated = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        table_html = display_df.to_html(index=False, border=0, justify="center")
-
-        return f"""
-        <html>
-        <head>
-            <title>Nifty50 Summary</title>
-            <style>
-                body {{
-                    font-family: Arial, sans-serif;
-                    padding: 20px;
-                }}
-
-                .table-container {{
-                    max-height: 600px;
-                    overflow-y: auto;
-                    border: 1px solid #ccc;
-                }}
-
-                table {{
-                    border-collapse: collapse;
-                    width: 100%;
-                    font-size: 13px;
-                }}
-
-                th, td {{
-                    border: 1px solid #ddd;
-                    padding: 6px 8px;
-                    text-align: center;
-                    white-space: nowrap;
-                }}
-
-                th {{
-                    background-color: #f4f6f8;
-                    position: sticky;
-                    top: 0;
-                }}
-
-                tr:nth-child(even) {{
-                    background-color: #fafafa;
-                }}
-            </style>
-        </head>
-        <body>
-            <h2>Nifty50 Technical Scoring Summary</h2>
-            <p><b>Last Updated:</b> {last_updated}</p>
-
-            <div class="table-container">
-                {table_html}
-            </div>
-
-            <br>
-            <a href="/">⬅ Back</a>
-        </body>
-        </html>
-        """
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ========================
-# Health Check
-# ========================
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-# ========================
-# Local / Render Entrypoint
+# Entrypoint
 # ========================
 if __name__ == "__main__":
     import uvicorn
